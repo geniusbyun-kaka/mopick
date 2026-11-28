@@ -4009,7 +4009,7 @@ async function myStockRows(stocks, cmpGurus) {
       // 13F 에 아직 안 잡힌 신규 지분도 있을 수 있어 보유 여부와 무관하게 찾는다.
       const f4 = pricedBuyEvents(evs, g, sym);
       if (!h && !f4.length) continue;
-      let rec = null, cur = null, rel = null, grade = -1;
+      let rec = null, avg = null, cur = null, rel = null, grade = -1;
       const holdSym = h && idx.some((x) => x.symbol === h.ticker) ? h.ticker : (item ? sym : null);
       // 1) 13F: 마지막 매수 분기의 추정 단가(최저가 +5%) (대가가 실제로 든 클래스 예: GOOGL 의 주가 이력으로 계산)
       const buys = h?.cusip ? guruBuys(f, h) : [];
@@ -4019,6 +4019,10 @@ async function myStockRows(stocks, cmpGurus) {
           const last = buys[buys.length - 1];
           const mid = quarterBuyEst(stock, last.period);
           if (mid != null) rec = { period: last.period, mid };
+          // 추정 평균단가: 매수 분기마다 추정 단가 × 늘린 주식수의 가중평균 (Max 라운지 "매수 가격 따라가기" guruFollowRows 와 동일)
+          let cost = 0, sh = 0;
+          for (const b of buys) { const bm = quarterBuyEst(stock, b.period); if (bm == null) continue; cost += bm * b.shares; sh += b.shares; }
+          if (sh > 0) avg = cost / sh;
         } catch {}
       }
       // 2) 실단가 공시·뉴스 우선 — Max 라운지와 동일한 공용 로직 (applyPricedEvents)
@@ -4028,7 +4032,7 @@ async function myStockRows(stocks, cmpGurus) {
         rel = cur != null ? cur / rec.mid - 1 : null;
         grade = rel == null ? -1 : rel <= 0 ? 2 : rel <= 0.1 ? 1 : 0;
       }
-      matches.push({ g, h, rec, cur, rel, grade });
+      matches.push({ g, h, rec, avg, cur, rel, grade });
     }
     // 관심 레전드 중 보유자가 없으면 나머지 추적 레전드의 보유 여부를 찾아 보여준다.
     // '보유 없음'이라고만 쓰면 다른 레전드(예: 매클레모어의 UNH)가 보유 중인 사실을 가리게 된다.
@@ -4049,7 +4053,7 @@ async function myStockRows(stocks, cmpGurus) {
 function myStockTableHtml(rows) {
   const cls = (v) => (v > 0 ? "pos" : v < 0 ? "neg" : "");
   const stockCell = (r) => `<span class="tk${r.item ? "" : " plain"}" ${r.item ? `data-stock="${r.sym}"` : ""}>${r.sym}</span><span class="nm">${r.item?.name || ""}</span>`;
-  // 판단·최근 매수가(추정)·대비는 라운지 "매수 가격 따라가기"와 같은 Pro 기능이라 Pro 미만에는 잠근다
+  // 판단·최근 매수가(추정)·추정 평균단가·대비는 라운지 "매수 가격 따라가기"와 같은 Pro 기능이라 Pro 미만에는 잠근다
   const proOk = planRank() >= PLAN_RANK.pro;
   const trs = rows.flatMap((r) => {
     const quote = `<td>${r.item ? fmt.n(r.item.price) : "–"}</td><td class="${cls(r.item?.changePercent)}">${r.item?.changePercent == null ? "–" : fmt.signed(r.item.changePercent) + "%"}</td>`;
@@ -4058,7 +4062,7 @@ function myStockTableHtml(rows) {
       const msg = r.others?.length
         ? `${r.others.slice(0, 3).map((o) => `${GURU_SHORT[o.g.id] || o.g.name} <span class="faint small">비중 ${fmt.n(o.h.weight * 100, 1)}%</span>`).join(" · ")} 보유 중 <span class="faint small">(관심 레전드에 추가하면 최근 매수가와 비교)</span>`
         : "추적 중인 레전드 보유 없음";
-      return [`<tr><td class="txt">${stockCell(r)}</td><td class="txt faint" colspan="5">${msg}</td>${quote}${tail}</tr>`];
+      return [`<tr><td class="txt">${stockCell(r)}</td><td class="txt faint" colspan="6">${msg}</td>${quote}${tail}</tr>`];
     }
     return r.matches.map((m) => {
       const gname = GURU_SHORT[m.g.id] || m.g.name;
@@ -4067,15 +4071,16 @@ function myStockTableHtml(rows) {
       const proCells = proOk
         ? `<td class="txt">${m.grade >= 0 ? followTagHtml(m.grade) : m.rec ? '<span class="faint">현재가 없음</span>' : '<span class="faint">최근 매수 이력 없음</span>'}</td>
         <td>${m.rec ? "$" + fmt.n(m.rec.mid) + (m.rec.form4 && m.rec.shares ? ` <span class="faint small">${fmtSh(m.rec.shares)}주</span>` : "") : "–"}</td>
+        <td>${m.avg != null ? "$" + fmt.n(m.avg) : "–"}</td>
         <td class="${m.rel == null ? "" : m.rel <= 0 ? "pos" : "neg"}">${m.rel == null ? "–" : fmt.pct(m.rel)}</td>`
-        : `<td class="txt faint" colspan="3">Pro 구독부터 🔒</td>`;
+        : `<td class="txt faint" colspan="4">Pro 구독부터 🔒</td>`;
       return `<tr><td class="txt">${stockCell(r)}</td>${proCells}
         <td class="txt">${gname}${holdNote} ${weightNote}</td>
         <td class="txt">${m.rec ? m.rec.period + (m.rec.form4 ? ` <span class="tag new">${m.rec.evLabel || "Form 4"}</span>` : "") : "–"}</td>${quote}${tail}</tr>`;
     });
   });
-  const upsell = proOk ? "" : `<p class="small faint" style="margin:0 0 8px">레전드 <strong>판단·최근 매수가(추정) 비교</strong>는 <strong>Pro 구독부터</strong> 제공됩니다. <button class="chip" type="button" id="my-pro-upsell">구독 안내 →</button></p>`;
-  return `${upsell}<div class="tablewrap"><table><thead><tr><th>종목</th><th>판단</th><th>최근 매수가 (추정)</th><th>최근 매수가 대비</th><th>관심 레전드</th><th>마지막 매수</th><th>현재가</th><th>전일비</th><th>관리</th></tr></thead><tbody>${trs.join("")}</tbody></table></div>`;
+  const upsell = proOk ? "" : `<p class="small faint" style="margin:0 0 8px">레전드 <strong>판단·최근 매수가(추정)·추정 평균단가 비교</strong>는 <strong>Pro 구독부터</strong> 제공됩니다. <button class="chip" type="button" id="my-pro-upsell">구독 안내 →</button></p>`;
+  return `${upsell}<div class="tablewrap"><table><thead><tr><th>종목</th><th>판단</th><th>최근 매수가 (추정)</th><th>추정 평균단가</th><th>최근 매수가 대비</th><th>관심 레전드</th><th>마지막 매수</th><th>현재가</th><th>전일비</th><th>관리</th></tr></thead><tbody>${trs.join("")}</tbody></table></div>`;
 }
 async function myGuruCardHtml(g) {
   const headBtn = `<button class="btn" type="button" data-port-open="${g.id}" style="margin-left:auto">상세 보기 →</button>`;
@@ -4236,7 +4241,7 @@ async function renderMyPage() {
   const stocks = favStocks(), gurus = favGurus();
   const guruObjs = gurus.map((id) => GURUS.find((g) => g.id === id)).filter(Boolean);
   const head = `<div class="card"><div class="card-head"><h3>My Page</h3><span class="small faint">관심 종목 ${stocks.length} · 관심 레전드 ${gurus.length}</span></div>
-    <p class="desc">종목 탭에서 종목을 연 뒤 <strong>☆</strong>를 누르면 관심 종목으로, 레전드 포트폴리오 탭이나 레전드 화면에서 <strong>☆</strong>를 누르면 관심 레전드로 등록됩니다. 관심 종목은 레전드들의 <strong>최근 매수가(추정)</strong>와 자동으로 비교됩니다.</p></div>`;
+    <p class="desc">종목 탭에서 종목을 연 뒤 <strong>☆</strong>를 누르면 관심 종목으로, 레전드 포트폴리오 탭이나 레전드 화면에서 <strong>☆</strong>를 누르면 관심 레전드로 등록됩니다. 관심 종목은 레전드들의 <strong>최근 매수가(추정)·추정 평균단가</strong>와 자동으로 비교됩니다.</p></div>`;
   if (!stocks.length && !gurus.length) {
     p.innerHTML = head + `<div class="card"><div class="empty">아직 등록한 관심 종목·레전드가 없습니다.<br>예를 들어 종목 탭에서 GOOG 를 검색해 열고 ☆를 누르고,<br>레전드 포트폴리오 탭 제목 옆의 ☆를 눌러 보세요.</div>
       <div class="form-actions" style="justify-content:center"><button class="btn primary" type="button" data-mytab="stocks">종목 보러 가기</button><button class="btn" type="button" data-mytab="buffett">레전드 포트폴리오 보러 가기</button></div></div>` + myPfCardHtml();
